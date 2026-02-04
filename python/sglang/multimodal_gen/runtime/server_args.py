@@ -286,6 +286,9 @@ class ServerArgs:
     # can restrict layers to adapt, e.g. ["q_proj"]
     # Will adapt only q, k, v, o by default.
     lora_target_modules: list[str] | None = None
+    # If True, LoRA can not be unmerged or switched at runtime (restart required),
+    # which can significantly reduce CPU RAM usage at LoRA load time.
+    lora_disable_hot_swapping: bool = False
 
     # CPU offload parameters
     dit_cpu_offload: bool | None = None
@@ -746,6 +749,13 @@ class ServerArgs:
             type=float,
             default=ServerArgs.lora_scale,
             help="LoRA scale for merging (e.g., 0.125 for Hyper-SD). Same as lora_scale in Diffusers",
+        )
+        parser.add_argument(
+            "--lora-disable-hot-swapping",
+            action=StoreBoolean,
+            default=ServerArgs.lora_disable_hot_swapping,
+            help="Reduce CPU RAM usage when loading LoRA by NOT keeping a CPU backup of original weights for unmerge. "
+            "When enabled, LoRA cannot be unmerged or switched at runtime (restart required).",
         )
         # Add pipeline configuration arguments
         PipelineConfig.add_cli_args(parser)

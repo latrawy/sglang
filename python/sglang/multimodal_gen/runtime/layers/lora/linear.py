@@ -43,12 +43,18 @@ class BaseLayerWithLoRA(nn.Module):
         base_layer: nn.Module,
         lora_rank: int | None = None,
         lora_alpha: int | None = None,
+        keep_cpu_weight: bool = True,
     ):
         super().__init__()
         self.base_layer: nn.Module = base_layer
 
         self.merged: bool = False
-        self.cpu_weight = base_layer.weight.to("cpu")
+        # Keep a CPU backup of original weights for unmerge / hot-switch.
+        # Disabling this can drastically reduce CPU RAM usage at LoRA load time,
+        # but makes unmerge / re-merge (strength change) impossible without restart.
+        self.cpu_weight: torch.Tensor | None = (
+            base_layer.weight.to("cpu") if keep_cpu_weight else None
+        )
         # indicates adapter weights don't contain this layer
         # (which shouldn't normally happen, but we want to separate it from the case of erroneous merging)
         # Default to True to prevent using uninitialized weights; set to False when weights are loaded
@@ -186,6 +192,12 @@ class BaseLayerWithLoRA(nn.Module):
             return
 
         if self.merged:
+            # Re-merge requires unmerge, which needs cpu_weight backup.
+            if self.cpu_weight is None:
+                raise ValueError(
+                    "LoRA unmerge is disabled (no CPU backup of original weights). "
+                    "Cannot re-merge with a different strength or switch LoRA at runtime; please restart the server."
+                )
             self.unmerge_lora_weights()
 
         # Use lora_weights_list if available, otherwise fall back to single LoRA for backward compatibility
@@ -255,6 +267,12 @@ class BaseLayerWithLoRA(nn.Module):
                 "LoRA weights not merged. Please merge them first before unmerging."
             )
 
+        if self.cpu_weight is None:
+            raise ValueError(
+                "LoRA unmerge is disabled (no CPU backup of original weights). "
+                "Please restart the server to remove/switch LoRA."
+            )
+
         # avoid precision loss
         if isinstance(self.base_layer.weight, DTensor):
             device = self.base_layer.weight.data.device
@@ -303,8 +321,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         base_layer: ColumnParallelLinear,
         lora_rank: int | None = None,
         lora_alpha: int | None = None,
+        keep_cpu_weight: bool = True,
     ) -> None:
-        super().__init__(base_layer, lora_rank, lora_alpha)
+        super().__init__(base_layer, lora_rank, lora_alpha, keep_cpu_weight)
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
         # duplicate the logic in ColumnParallelLinear
@@ -338,8 +357,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         base_layer: MergedColumnParallelLinear,
         lora_rank: int | None = None,
         lora_alpha: int | None = None,
+        keep_cpu_weight: bool = True,
     ) -> None:
-        super().__init__(base_layer, lora_rank, lora_alpha)
+        super().__init__(base_layer, lora_rank, lora_alpha, keep_cpu_weight)
 
     def slice_lora_a_weights(self, A: torch.Tensor) -> torch.Tensor:
         return A.to(self.base_layer.weight)
@@ -360,8 +380,9 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         base_layer: QKVParallelLinear,
         lora_rank: int | None = None,
         lora_alpha: int | None = None,
+        keep_cpu_weight: bool = True,
     ) -> None:
-        super().__init__(base_layer, lora_rank, lora_alpha)
+        super().__init__(base_layer, lora_rank, lora_alpha, keep_cpu_weight)
 
     def slice_lora_a_weights(self, A: torch.Tensor) -> torch.Tensor:
         return A
@@ -393,8 +414,9 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         base_layer: RowParallelLinear,
         lora_rank: int | None = None,
         lora_alpha: int | None = None,
+        keep_cpu_weight: bool = True,
     ) -> None:
-        super().__init__(base_layer, lora_rank, lora_alpha)
+        super().__init__(base_layer, lora_rank, lora_alpha, keep_cpu_weight)
 
     def forward(self, input_: torch.Tensor):
         # duplicate the logic in RowParallelLinear
@@ -451,8 +473,9 @@ class LinearWithLoRA(BaseLayerWithLoRA):
         base_layer: nn.Linear,
         lora_rank: int | None = None,
         lora_alpha: int | None = None,
+        keep_cpu_weight: bool = True,
     ) -> None:
-        super().__init__(base_layer, lora_rank, lora_alpha)
+        super().__init__(base_layer, lora_rank, lora_alpha, keep_cpu_weight)
 
     @torch.compile()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -487,6 +510,7 @@ def wrap_with_lora_layer(
     layer: nn.Module,
     lora_rank: int | None = None,
     lora_alpha: int | None = None,
+    keep_cpu_weight: bool = True,
 ) -> BaseLayerWithLoRA | None:
     """
     transform the given layer to its corresponding LoRA layer
@@ -509,6 +533,7 @@ def wrap_with_lora_layer(
                 layer,
                 lora_rank=lora_rank,
                 lora_alpha=lora_alpha,
+                keep_cpu_weight=keep_cpu_weight,
             )
             return ret
     return None
